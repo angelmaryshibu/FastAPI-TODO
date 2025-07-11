@@ -1,6 +1,7 @@
 from fastapi import FastAPI , Depends
-from basesub import UserOut,Users,Login,DTask,Tasks,Display,UpdateTask
-from sqlalchemy import Select
+from uuid import UUID
+from basesub import Users,Login,Tasks,Display,UpdateTask
+from sqlalchemy import Select,func
 from sqlalchemy.orm import Session 
 from pydantic import BaseModel 
 from contextlib import asynccontextmanager
@@ -13,7 +14,7 @@ from passlib.context import CryptContext
 @asynccontextmanager
 async def lifespan(_):
     Base.metadata.create_all(bind=engine)
-    yield 
+    yield
 
 app=FastAPI(lifespan=lifespan)
 
@@ -32,7 +33,7 @@ def get_db():
     finally:
         db.close()
 
-@app.post('/Register/')
+@app.post('/register/')
 def register_user(user:Users , db:Session=Depends(get_db)):
     hash=hash_password(user.password)
     db_user=User(name=user.name, email=user.email,password=hash)
@@ -41,7 +42,7 @@ def register_user(user:Users , db:Session=Depends(get_db)):
     return {"message":"User Registered"}
 
 
-@app.post('/Login/')
+@app.post('/login/')
 def login(user: Login,db: Session = Depends(get_db)):
     db_user=db.query(User).filter(User.email==user.email).first()
     if not db_user or not verify_password(user.password,db_user.password):
@@ -58,28 +59,29 @@ def create_task(task:Tasks , db:Session=Depends(get_db)):
         return {"message":"Session ID failed"}
     db.add(Task(user_id=db_session.user_id, title=task.title))
     db.commit()
-    return {"task":task.title}
+    return {"task":task.title,"message":"created"}
 
 @app.delete('/task/')
-def delete_task(task:DTask,db:Session=Depends(get_db)):
+def delete_task(task:Tasks,db:Session=Depends(get_db)):
     db_session=db.query(UserSession).filter(UserSession.session_id==task.sid).first()
     if not db_session:
         return {"message":"Session ID failed"}
-    title=task.title
-    db_task=db.query(Task).filter(Task.user_id==db_session.user_id,Task.title==task.title).first()
+    title=title
+    db_task=db.query(Task).filter(Task.user_id==db_session.user_id,func.lower(Task.title) == func.lower(task.title)).first()
     if not db_task:
-        return {"no task found"}
+        return {"message":"no task found"}
     db.delete(db_task)
     db.commit()
+    return{"message":"Task Deleted"}
 
 @app.get('/task/')
 def display_task(sessionid:Display,db:Session=Depends(get_db)):
-    db_session=db.query(UserSession).filter(UserSession.session_id==task.sid).first()
+    db_session=db.query(UserSession).filter(UserSession.session_id==sessionid.sid).first()
     if not db_session:
         return {"message":"Session ID failed"}
-    db_user=db.query(User).filter(User.id==db_session.session_id).first()
-    task=db.query(Task).filter(Task.user_id==db_user.id).all()
+    db_user=db.query(User).filter(User.id==db_session.user_id).first()
 
+    task=db.query(Task).filter(Task.user_id==db_user.id).all()
 
     task_titles=[{"title":user.title, "complete": user.completed} for user in task]
     
@@ -87,15 +89,15 @@ def display_task(sessionid:Display,db:Session=Depends(get_db)):
         "user":db_user.name,
         "tasks":task_titles
     }
+
 @app.put("/task/")
 def update_task(uptask:UpdateTask,db:Session=Depends(get_db)):
     db_session=db.query(UserSession).filter(UserSession.session_id==uptask.sid).first()
     if not db_session:
         return {"message":"Session ID failed"}
-    db.query(Task).filter(
-    Task.user_id == db_session.user_id,
-    Task.title == uptask.title
-    ).update({"completed": True})
+    new=db.query(Task).filter(Task.user_id == db_session.user_id,func.lower(Task.title) == func.lower(uptask.title)).update({"completed": uptask.status})
+    if not new:
+        return{"message":"Task not Found"}
     db.commit()
     return{"message":"Task Updated"}
 
@@ -108,8 +110,4 @@ def logout(id:Display,db:Session=Depends(get_db)):
     db.delete(db_session)
     db.commit()
     return {"message":"logout successfully"}
-
-
-
-
 
