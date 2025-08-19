@@ -1,8 +1,8 @@
 from fastapi import FastAPI , Depends
 from uuid import UUID
 from basesub import Users,Login,Tasks,Display,UpdateTask
-from sqlalchemy import Select,func
-from sqlalchemy.orm import Session 
+from sqlalchemy import select,func,update
+from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel 
 from contextlib import asynccontextmanager
 from createdb import SessionLocal,engine , Base
@@ -13,7 +13,8 @@ from passlib.context import CryptContext
 
 @asynccontextmanager
 async def lifespan(_):
-    Base.metadata.create_all(bind=engine)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     yield
 
 app=FastAPI(lifespan=lifespan)
@@ -26,62 +27,69 @@ def hash_password(password):
 def verify_password(password,hashed_password):
     return pwd_context.verify(password,hashed_password)
 
-def get_db():
+async def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
-        db.close()
+        await db.close()
 
 @app.post('/register/')
-def register_user(user:Users , db:Session=Depends(get_db)):
+async def register_user(user:Users , db:AsyncSession=Depends(get_db)):
     hash=hash_password(user.password)
     db_user=User(name=user.name, email=user.email,password=hash)
     db.add(db_user)
-    db.commit()
+    await db.commit()
     return {"message":"User Registered"}
 
 
 @app.post('/login/')
-def login(user: Login,db: Session = Depends(get_db)):
-    db_user=db.query(User).filter(User.email==user.email).first()
+async def login(user: Login,db: AsyncSession = Depends(get_db)):
+    db_user=await db.execute(select(User).where(User.email==user.email))
+    db_user=db_user.scalars().first()
     if not db_user or not verify_password(user.password,db_user.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     session = UserSession(user_id=db_user.id)
     db.add(session)
-    db.commit()
-    return {"Message":"Login Successful", "status": "success", "session": session.session_id}
+    await db.commit()
+    await db.refresh(session)
+    return {"Message":"Login Successful", "status": "success", "session": str(session.session_id)}
 
 @app.post('/task/')
-def create_task(task:Tasks , db:Session=Depends(get_db)):
-    db_session=db.query(UserSession).filter(UserSession.session_id==task.sid).first()
+async def create_task(task:Tasks , db:AsyncSession=Depends(get_db)):
+    db_session=await db.execute(select(UserSession).where(UserSession.session_id==task.sid))
+    db_session=db_session.scalars().first()
     if not db_session:
         return {"message":"Session ID failed"}
     db.add(Task(user_id=db_session.user_id, title=task.title))
-    db.commit()
+    await db.commit()
     return {"task":task.title,"message":"created"}
 
 @app.delete('/task/')
-def delete_task(task:Tasks,db:Session=Depends(get_db)):
-    db_session=db.query(UserSession).filter(UserSession.session_id==task.sid).first()
+async def delete_task(task:Tasks,db:AsyncSession=Depends(get_db)):
+    db_session=await db.execute(select(UserSession).where(UserSession.session_id==task.sid))
+    db_session=db_session.scalars().first()
     if not db_session:
         return {"message":"Session ID failed"}
-    title=title
-    db_task=db.query(Task).filter(Task.user_id==db_session.user_id,func.lower(Task.title) == func.lower(task.title)).first()
+    db_task=await db.execute(select(Task).where(Task.user_id==db_session.user_id,func.lower(Task.title) == func.lower(task.title)))
+    db_task=db_task.scalars().first()
     if not db_task:
         return {"message":"no task found"}
-    db.delete(db_task)
-    db.commit()
+    await db.delete(db_task)
+    await db.commit()
     return{"message":"Task Deleted"}
 
 @app.get('/task/')
-def display_task(sessionid:Display,db:Session=Depends(get_db)):
-    db_session=db.query(UserSession).filter(UserSession.session_id==sessionid.sid).first()
+async def display_task(sessionid:Display,db:AsyncSession=Depends(get_db)):
+    db_session=await db.execute(select(UserSession).where(UserSession.session_id==sessionid.sid))
+    db_session=db_session.scalars().first()
     if not db_session:
         return {"message":"Session ID failed"}
-    db_user=db.query(User).filter(User.id==db_session.user_id).first()
+    db_user=await db.execute(select(User).where(User.id==db_session.user_id))
+    db_user=db_user.scalars().first()
 
-    task=db.query(Task).filter(Task.user_id==db_user.id).all()
+    task=await db.execute(select(Task).where(Task.user_id==db_user.id))
+    task=task.scalars().all()
 
     task_titles=[{"title":user.title, "complete": user.completed} for user in task]
     
@@ -91,23 +99,25 @@ def display_task(sessionid:Display,db:Session=Depends(get_db)):
     }
 
 @app.put("/task/")
-def update_task(uptask:UpdateTask,db:Session=Depends(get_db)):
-    db_session=db.query(UserSession).filter(UserSession.session_id==uptask.sid).first()
+async def update_task(uptask:UpdateTask,db:AsyncSession=Depends(get_db)):
+    db_session=await db.execute(select(UserSession).where(UserSession.session_id==uptask.sid))
+    db_session=db_session.scalars().first()
     if not db_session:
         return {"message":"Session ID failed"}
-    new=db.query(Task).filter(Task.user_id == db_session.user_id,func.lower(Task.title) == func.lower(uptask.title)).update({"completed": uptask.status})
+    new=await db.execute(update(Task).where(Task.user_id == db_session.user_id, func.lower(Task.title) == func.lower(uptask.title)).values(completed=uptask.status))
     if not new:
         return{"message":"Task not Found"}
-    db.commit()
+    await db.commit()
     return{"message":"Task Updated"}
 
 
 @app.post("/logout")
-def logout(id:Display,db:Session=Depends(get_db)):
-    db_session=db.query(UserSession).filter(UserSession.session_id==id.sid).first()
+async def logout(id:Display,db:AsyncSession=Depends(get_db)):
+    db_session=await db.execute(select(UserSession).where(UserSession.session_id==id.sid))
+    db_session=db_session.scalars().first()
     if not db_session:
         return {"message":"Session ID failed"}
-    db.delete(db_session)
-    db.commit()
+    await db.delete(db_session)
+    await db.commit()
     return {"message":"logout successfully"}
 
