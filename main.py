@@ -32,6 +32,9 @@ async def db_session_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
         return response
+    except Exception:
+        await db.rollback()   
+        raise 
     finally:
         await db.remove()
 
