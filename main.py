@@ -1,11 +1,11 @@
-from fastapi import FastAPI , Depends
+from fastapi import FastAPI , Request
 from uuid import UUID
 from basesub import Users,Login,Tasks,Display,UpdateTask
 from sqlalchemy import select,func,update
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel 
 from contextlib import asynccontextmanager
-from createdb import SessionLocal,engine , Base
+from createdb import db,engine , Base
 from models import User , Task, UserSession
 from fastapi.exceptions import HTTPException
 from typing import List
@@ -27,15 +27,16 @@ def hash_password(password):
 def verify_password(password,hashed_password):
     return pwd_context.verify(password,hashed_password)
 
-async def get_db():
-    db = SessionLocal()
+@app.middleware("http")
+async def db_session_middleware(request: Request, call_next):
     try:
-        yield db
+        response = await call_next(request)
+        return response
     finally:
-        await db.close()
+        await db.remove()
 
 @app.post('/register/')
-async def register_user(user:Users , db:AsyncSession=Depends(get_db)):
+async def register_user(user:Users):
     hash=hash_password(user.password)
     db_user=User(name=user.name, email=user.email,password=hash)
     db.add(db_user)
@@ -44,7 +45,7 @@ async def register_user(user:Users , db:AsyncSession=Depends(get_db)):
 
 
 @app.post('/login/')
-async def login(user: Login,db: AsyncSession = Depends(get_db)):
+async def login(user: Login):
     db_user=await db.execute(select(User).where(User.email==user.email))
     db_user=db_user.scalars().first()
     if not db_user or not verify_password(user.password,db_user.password):
@@ -56,7 +57,7 @@ async def login(user: Login,db: AsyncSession = Depends(get_db)):
     return {"Message":"Login Successful", "status": "success", "session": str(session.session_id)}
 
 @app.post('/task/')
-async def create_task(task:Tasks , db:AsyncSession=Depends(get_db)):
+async def create_task(task:Tasks):
     db_session=await db.execute(select(UserSession).where(UserSession.session_id==task.sid))
     db_session=db_session.scalars().first()
     if not db_session:
@@ -66,7 +67,7 @@ async def create_task(task:Tasks , db:AsyncSession=Depends(get_db)):
     return {"task":task.title,"message":"created"}
 
 @app.delete('/task/')
-async def delete_task(task:Tasks,db:AsyncSession=Depends(get_db)):
+async def delete_task(task:Tasks):
     db_session=await db.execute(select(UserSession).where(UserSession.session_id==task.sid))
     db_session=db_session.scalars().first()
     if not db_session:
@@ -80,7 +81,7 @@ async def delete_task(task:Tasks,db:AsyncSession=Depends(get_db)):
     return{"message":"Task Deleted"}
 
 @app.get('/task/')
-async def display_task(sessionid:Display,db:AsyncSession=Depends(get_db)):
+async def display_task(sessionid:Display):
     db_session=await db.execute(select(UserSession).where(UserSession.session_id==sessionid.sid))
     db_session=db_session.scalars().first()
     if not db_session:
@@ -99,7 +100,7 @@ async def display_task(sessionid:Display,db:AsyncSession=Depends(get_db)):
     }
 
 @app.put("/task/")
-async def update_task(uptask:UpdateTask,db:AsyncSession=Depends(get_db)):
+async def update_task(uptask:UpdateTask):
     db_session=await db.execute(select(UserSession).where(UserSession.session_id==uptask.sid))
     db_session=db_session.scalars().first()
     if not db_session:
@@ -112,7 +113,7 @@ async def update_task(uptask:UpdateTask,db:AsyncSession=Depends(get_db)):
 
 
 @app.post("/logout")
-async def logout(id:Display,db:AsyncSession=Depends(get_db)):
+async def logout(id:Display):
     db_session=await db.execute(select(UserSession).where(UserSession.session_id==id.sid))
     db_session=db_session.scalars().first()
     if not db_session:
